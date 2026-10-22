@@ -31,7 +31,6 @@ ___INFO___
 
 
 ___TEMPLATE_PARAMETERS___
-
 [
   {
     "type": "TEXT",
@@ -195,6 +194,83 @@ ___TEMPLATE_PARAMETERS___
         "displayName": "New Session",
         "simpleValueType": true,
         "help": "A \"true\" or \"false\" value, which if true, instructs Intercom to register the request as a session."
+      }
+    ],
+    "enablingConditions": [
+      {
+        "paramName": "actionType",
+        "paramValue": "upsert_user",
+        "type": "EQUALS"
+      }
+    ]
+  },
+  {
+    "type": "GROUP",
+    "name": "followUpEventGroup",
+    "displayName": "Then submit event",
+    "groupStyle": "ZIPPY_CLOSED",
+    "subParams": [
+      {
+        "type": "LABEL",
+        "name": "fuLabel1",
+        "displayName": "Optional. Logs an event for this user once the create/update has succeeded, so the event can\u0027t arrive before the user exists. Server containers have no tag sequencing, so ordering has to happen inside one tag."
+      },
+      {
+        "type": "TEXT",
+        "name": "fuEventName",
+        "displayName": "Event Name",
+        "simpleValueType": true,
+        "help": "Leave blank to skip. Sent to /events only after /users returns 2xx, using this tag\u0027s User ID (or Email if no User ID)."
+      },
+      {
+        "type": "TEXT",
+        "name": "fuCreatedAt",
+        "displayName": "Created At",
+        "simpleValueType": true,
+        "help": "The time the event occurred as a UTC Unix timestamp (in seconds)."
+      },
+      {
+        "type": "SIMPLE_TABLE",
+        "name": "fuMetaData",
+        "displayName": "Meta Data",
+        "simpleTableColumns": [
+          {
+            "defaultValue": "",
+            "displayName": "Field",
+            "name": "field",
+            "type": "TEXT",
+            "isUnique": true,
+            "valueValidators": []
+          },
+          {
+            "defaultValue": "string",
+            "displayName": "Type",
+            "name": "type",
+            "type": "SELECT",
+            "selectItems": [
+              {
+                "value": "text",
+                "displayValue": "Text"
+              },
+              {
+                "value": "number",
+                "displayValue": "Number"
+              },
+              {
+                "value": "boolean",
+                "displayValue": "Boolean"
+              }
+            ],
+            "macrosInSelect": false,
+            "valueValidators": []
+          },
+          {
+            "defaultValue": "",
+            "displayName": "Value",
+            "name": "value",
+            "type": "TEXT"
+          }
+        ]
       }
     ],
     "enablingConditions": [
@@ -391,7 +467,6 @@ ___TEMPLATE_PARAMETERS___
   }
 ]
 
-
 ___SANDBOXED_JS_FOR_SERVER___
 
 const sendHttpRequest = require("sendHttpRequest");
@@ -566,38 +641,71 @@ function logData(message, data) {
 }
 logData("Sending request to Intercom", { data: bodyData });
 
-sendHttpRequest(
-  "https://api.intercom.io" + path,
-  (statusCode, headers, body) => {
-    if (statusCode >= 200 && statusCode < 300) {
-      data.gtmOnSuccess();
-    } else {
-      /* Additional logging enabled to troubleshoot
-       * https://3.basecamp.com/3161551/buckets/28932035/todos/9313686364
-      if (isDebug) {
+function send(requestPath, requestBody, onSuccess) {
+  sendHttpRequest(
+    "https://api.intercom.io" + requestPath,
+    (statusCode, headers, body) => {
+      if (statusCode >= 200 && statusCode < 300) {
+        onSuccess();
+      } else {
+        /* Additional logging enabled to troubleshoot
+         * https://3.basecamp.com/3161551/buckets/28932035/todos/9313686364
+        if (isDebug) {
+        }
+        */
+        logData("Intercom API Error", {
+          path: requestPath,
+          statusCode: statusCode,
+          headers: headers,
+          body: body,
+        });
+        data.gtmOnFailure();
       }
-      */
-      logData("Intercom API Error", {
-        statusCode: statusCode,
-        headers: headers,
-        body: body,
-      });
-      data.gtmOnFailure();
-    }
-  },
-  {
-    headers: {
-      Authorization: "Bearer " + data.accessToken,
-      "Intercom-Version": "1.4",
-      Accept: "application/json",
-      "Content-Type": "application/json",
     },
-    method: "POST",
-    timeout: 3500,
-  },
-  JSON.stringify(bodyData)
-);
+    {
+      headers: {
+        Authorization: "Bearer " + data.accessToken,
+        "Intercom-Version": "1.4",
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      method: "POST",
+      timeout: 3500,
+    },
+    JSON.stringify(requestBody)
+  );
+}
 
+// Optional follow-up event on upsert_user. Sent only once the user exists,
+// because /events rejects unknown users ("User Not Found") and server
+// containers have no tag sequencing to order two separate tags.
+function buildFollowUpEvent() {
+  if (data.actionType !== "upsert_user" || !data.fuEventName) {
+    return null;
+  }
+  const eventBody = { event_name: makeString(data.fuEventName) };
+  if (bodyData.user_id) {
+    eventBody.user_id = bodyData.user_id;
+  } else if (bodyData.email) {
+    eventBody.email = bodyData.email;
+  }
+  if (data.fuCreatedAt) {
+    eventBody.created_at = makeNumber(data.fuCreatedAt);
+  }
+  eventBody.metadata = formatCustomAttributes(data.fuMetaData);
+  return eventBody;
+}
+
+const followUpEvent = buildFollowUpEvent();
+
+send(path, bodyData, () => {
+  if (!followUpEvent) {
+    data.gtmOnSuccess();
+    return;
+  }
+  logData("Sending follow-up event to Intercom", { data: followUpEvent });
+  send("/events", followUpEvent, data.gtmOnSuccess);
+});
 
 ___SERVER_PERMISSIONS___
 
